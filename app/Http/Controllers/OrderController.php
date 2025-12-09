@@ -409,12 +409,14 @@ class OrderController extends Controller
                     $seller->save();
                 }
 
-                if (addon_is_activated('affiliate_system')) {
+                if (addon_is_activated('affiliate_system') && class_exists('App\\Http\\Controllers\\AffiliateController')) {
                     if ($order_detail->product_referral_code) {
                         $referred_by_user = User::where('referral_code', $order_detail->product_referral_code)->first();
 
-                        $affiliateController = new AffiliateController;
-                        $affiliateController->processAffiliateStats($referred_by_user->id, 0, $order_detail->quantity, 0, 0);
+                        if ($referred_by_user) {
+                            $affiliateController = new \App\Http\Controllers\AffiliateController;
+                            $affiliateController->processAffiliateStats($referred_by_user->id, 0, $order_detail->quantity, 0, 0);
+                        }
                     }
                 }
             }
@@ -574,12 +576,14 @@ class OrderController extends Controller
                     $seller->save();
                 }
 
-                if (addon_is_activated('affiliate_system')) {
+                if (addon_is_activated('affiliate_system') && class_exists('App\\Http\\Controllers\\AffiliateController')) {
                     if ($order_detail->product_referral_code) {
                         $referred_by_user = User::where('referral_code', $order_detail->product_referral_code)->first();
 
-                        $affiliateController = new AffiliateController;
-                        $affiliateController->processAffiliateStats($referred_by_user->id, 0, $order_detail->quantity, 0, 0);
+                        if ($referred_by_user) {
+                            $affiliateController = new \App\Http\Controllers\AffiliateController;
+                            $affiliateController->processAffiliateStats($referred_by_user->id, 0, $order_detail->quantity, 0, 0);
+                        }
                     }
                 }
             }
@@ -754,8 +758,11 @@ class OrderController extends Controller
     $order->save();
 
     $shippingCharge = $order->orderDetails()->sum('shipping_cost');
+    
+    // Use 'status' parameter from the AJAX request
+    $newStatus = $request->status;
 
-    if ($request->delivery_status === 'transfered') {
+    if ($newStatus === 'transfered') {
         // All transferable products (those that have b_product_id)
         $transferable = $order->orderDetails()->whereHas('product', function ($q) {
             $q->whereNotNull('b_product_id');
@@ -769,19 +776,27 @@ class OrderController extends Controller
             $order->save();
 
             // ---------------- API CALL for same order ----------------
-            $appKey = get_setting('droploo_app_key', 'CS9QWX1GOEQZ06T3');
-            $appSecret = get_setting('droploo_app_secret', 'XTjlDJqmG5Bo6UDX5sPnVhNC3v9nVoHJ');
-            $userName = get_setting('droploo_username', 'sharmin-akther_globalmartxyz');
+            $appKey = get_setting('droploo_app_key', '');
+            $appSecret = get_setting('droploo_app_secret', '');
+            $userName = get_setting('droploo_username', '');
             $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
 
             $order_shipping_address = json_decode($order->shipping_address);
+            
+            // Add null check for shipping address
+            if (!$order_shipping_address) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid shipping address data'
+                ]);
+            }
 
             $payload = [
                 'invoice_number'        => ($order->code ?? $order->id),
-                'customer_name'         => $order_shipping_address->name,
-                'customer_phone'        => $order_shipping_address->phone,
+                'customer_name'         => $order_shipping_address->name ?? '',
+                'customer_phone'        => $order_shipping_address->phone ?? '',
                 'delivery_cost'         => (int) $shippingCharge,
-                'customer_address'      => $order_shipping_address->address,
+                'customer_address'      => $order_shipping_address->address ?? '',
                 'price'                 => (int) $order->grand_total,
                 'discount'              => 0,
                 'advance'               => 0,
@@ -793,15 +808,34 @@ class OrderController extends Controller
                 'payment_gateway'       => $order->payment_type ?? 'N/A',
                 'transaction_id'        => $order->payment_details ?? null,
                 'products'              => $order->orderDetails->map(function ($detail) {
+                    // Check if product exists and has b_product_id
+                    if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
+                        return null;
+                    }
                     return [
-                        'id'    => optional($detail->product)->b_product_id,
+                        'id'    => $detail->product->b_product_id ?? null,
                         'price' => $detail->price,
                         'color' => $detail->variation ?? null,
                         'size'  => $detail->variation ?? null,
                         'qty'   => $detail->quantity,
                     ];
-                })->filter(fn($p) => $p['id'])->values()->all(),
+                })->filter(fn($p) => $p !== null)->values()->all(),
             ];
+            // Validate that we have products to transfer
+            if (empty($payload['products'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No valid products with b_product_id found for transfer'
+                ]);
+            }
+
+            // Add validation for required fields
+            if (empty($appKey) || empty($appSecret) || empty($userName)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Missing Droploo API credentials'
+                ]);
+            }
 
             try {
                 $response = Http::withHeaders([
@@ -817,8 +851,8 @@ class OrderController extends Controller
             } catch (\Exception $e) {
                 DB::rollBack();
                 return response()->json([
-                    'status' => false,
-                    'msg'    => $e->getMessage()
+                    'success' => false,
+                    'message'    => $e->getMessage()
                 ]);
             }
         }
@@ -840,16 +874,16 @@ class OrderController extends Controller
 
                 // calculate new order totals
                 $newOrderTotal += $line->quantity * $line->price;
-                $newOrderDiscount += $order->coupon_discount;
+                $newOrderDiscount += $order->coupon_discount ?? 0;
 
                 // remove from original order
                 $line->delete();
             }
 
             // recalc original order totals
-            foreach ($order->details as $line) {
+            foreach ($order->orderDetails as $line) {
                 $originalTotal += $line->quantity * $line->price;
-                $originalDiscount += $order->coupon_discount;
+                $originalDiscount += $order->coupon_discount ?? 0;
             }
 
             // update original order
@@ -864,19 +898,27 @@ class OrderController extends Controller
             $newOrder->save();
 
             // ---------------- API CALL for new order ----------------
-            $appKey = get_setting('droploo_app_key', 'vv');
-            $appSecret = get_setting('droploo_app_secret', 'vv');
-            $userName = get_setting('droploo_username', 'vv');
+            $appKey = get_setting('droploo_app_key', '');
+            $appSecret = get_setting('droploo_app_secret', '');
+            $userName = get_setting('droploo_username', '');
             $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
 
             $order_shipping_address = json_decode($newOrder->shipping_address);
+            
+            // Add null check for shipping address
+            if (!$order_shipping_address) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid shipping address data for new order'
+                ]);
+            }
 
             $payload = [
-                'invoice_number'        => "globalmart" . '-' . ($newOrder->code ?? $newOrder->id),
-                'customer_name'         => $order_shipping_address->name,
-                'customer_phone'        => $order_shipping_address->phone,
+                'invoice_number'        => ($newOrder->code ?? $newOrder->id),
+                'customer_name'         => $order_shipping_address->name ?? '',
+                'customer_phone'        => $order_shipping_address->phone ?? '',
                 'delivery_cost'         => (int) $originalShipping,
-                'customer_address'      => $order_shipping_address->address,
+                'customer_address'      => $order_shipping_address->address ?? '',
                 'price'                 => (int) $newOrder->grand_total,
                 'discount'              => 0,
                 'advance'               => 0,
@@ -884,19 +926,39 @@ class OrderController extends Controller
                 'delivery_charge_type'  => 'COD',
                 'payment_type'          => 'wallet',
                 'order_type'            => 'Dropshipping',
-                'special_notes'         => $newOrder->note ?? 'N/A',
+                'special_notes'         => $newOrder->notes ?? 'N/A',
                 'payment_gateway'       => $newOrder->payment_type ?? 'N/A',
                 'transaction_id'        => $newOrder->payment_details ?? null,
                 'products'              => $newOrder->orderDetails->map(function ($detail) {
+                    // Check if product exists and has b_product_id
+                    if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
+                        return null;
+                    }
                     return [
-                        'id'    => optional($detail->product)->b_product_id,
+                        'id'    => $detail->product->b_product_id ?? null,
                         'price' => $detail->price,
                         'color' => $detail->variation ?? null,
                         'size'  => $detail->variation ?? null,
                         'qty'   => $detail->quantity,
                     ];
-                })->filter(fn($p) => $p['id'])->values()->all(),
+                })->filter(fn($p) => $p !== null)->values()->all(),
             ];
+
+            // Validate that we have products to transfer
+            if (empty($payload['products'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No valid products with b_product_id found for transfer in new order'
+                ]);
+            }
+
+            // Add validation for required fields
+            if (empty($appKey) || empty($appSecret) || empty($userName)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Missing Droploo API credentials for new order'
+                ]);
+            }
 
             try {
                 $response = Http::withHeaders([
@@ -912,8 +974,8 @@ class OrderController extends Controller
             } catch (\Exception $e) {
                 DB::rollBack();
                 return response()->json([
-                    'status' => false,
-                    'msg'    => $e->getMessage()
+                    'success' => false,
+                    'message'    => $e->getMessage()
                 ]);
             }
         }
@@ -928,8 +990,10 @@ class OrderController extends Controller
     // ---------------- WALLET REFUND ----------------
     if ($request->status == 'cancelled' && $order->payment_type == 'wallet') {
         $user = User::find($order->user_id);
-        $user->balance += $order->grand_total;
-        $user->save();
+        if ($user) {
+            $user->balance += $order->grand_total;
+            $user->save();
+        }
     }
 
     // ---------------- PRODUCT STOCK / SELLER LOGIC ----------------
@@ -966,7 +1030,7 @@ class OrderController extends Controller
             }
 
             // ---------------- AFFILIATE SYSTEM ----------------
-            if (addon_is_activated('affiliate_system')) {
+            if (addon_is_activated('affiliate_system') && class_exists('App\Http\Controllers\AffiliateController')) {
                 if (($request->status == 'delivered' || $request->status == 'cancelled') &&
                     $orderDetail->product_referral_code) {
 
@@ -974,40 +1038,50 @@ class OrderController extends Controller
                     $no_of_canceled = $request->status == 'cancelled' ? $orderDetail->quantity : 0;
 
                     $referred_by_user = User::where('referral_code', $orderDetail->product_referral_code)->first();
-                    $affiliateController = new AffiliateController;
-                    $affiliateController->processAffiliateStats($referred_by_user->id, 0, 0, $no_of_delivered, $no_of_canceled);
+                    if ($referred_by_user) {
+                        $affiliateController = new \App\Http\Controllers\AffiliateController;
+                        $affiliateController->processAffiliateStats($referred_by_user->id, 0, 0, $no_of_delivered, $no_of_canceled);
+                    }
                 }
             }
         }
     }
 
     // ---------------- OTP SYSTEM ----------------
-    if (addon_is_activated('otp_system') && SmsTemplate::where('identifier', 'delivery_status_change')->first()->status == 1) {
+    $smsTemplate = SmsTemplate::where('identifier', 'delivery_status_change')->first();
+    if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
         try {
-            SmsUtility::delivery_status_change(json_decode($order->shipping_address)->phone, $order);
+            $shipping_address = json_decode($order->shipping_address);
+            if ($shipping_address && isset($shipping_address->phone)) {
+                SmsUtility::delivery_status_change($shipping_address->phone, $order);
+            }
         } catch (\Exception $e) {}
     }
 
     // ---------------- NOTIFICATIONS ----------------
     NotificationUtility::sendNotification($order, $request->status);
 
-    if (get_setting('google_firebase') == 1 && $order->user->device_token != null) {
-        $request->device_token = $order->user->device_token;
-        $request->title = "Order updated !";
+    if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
+        // Create a temporary object with required properties for Firebase notification
+        $notificationData = new \stdClass();
+        $notificationData->device_token = $order->user->device_token;
+        $notificationData->title = "Order updated !";
         $status = str_replace("_", "", $order->delivery_status);
-        $request->text = " Your order {$order->code} has been {$status}";
-        $request->type = "order";
-        $request->id = $order->id;
-        $request->user_id = $order->user->id;
-        NotificationUtility::sendFirebaseNotification($request);
+        $notificationData->text = " Your order {$order->code} has been {$status}";
+        $notificationData->type = "order";
+        $notificationData->id = $order->id;
+        $notificationData->user_id = $order->user->id;
+        NotificationUtility::sendFirebaseNotification($notificationData);
     }
-
-    if (addon_is_activated('delivery_boy')) {
-        if (Auth::user()->user_type == 'delivery_boy') {
-            $deliveryBoyController = new DeliveryBoyController;
-            $deliveryBoyController->store_delivery_history($order);
-        }
+    
+    // Check if this is an AJAX request
+    if ($request->ajax() || $request->wantsJson()) {
+        return response()->json([
+            'success' => true,
+            'message' => translate('Delivery status has been updated')
+        ]);
     }
+    
     flash(translate('Order has been status update successfully'))->success();
     return back();
 }
@@ -1054,23 +1128,29 @@ class OrderController extends Controller
 
         //sends Notifications to user
         NotificationUtility::sendNotification($order, $request->status);
-        if (get_setting('google_firebase') == 1 && $order->user->device_token != null) {
-            $request->device_token = $order->user->device_token;
-            $request->title = "Order updated !";
+        if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
+            // Create a temporary object with required properties for Firebase notification
+            $notificationData = new \stdClass();
+            $notificationData->device_token = $order->user->device_token;
+            $notificationData->title = "Order updated !";
             $status = str_replace("_", "", $order->payment_status);
-            $request->text = " Your order {$order->code} has been {$status}";
+            $notificationData->text = " Your order {$order->code} has been {$status}";
 
-            $request->type = "order";
-            $request->id = $order->id;
-            $request->user_id = $order->user->id;
+            $notificationData->type = "order";
+            $notificationData->id = $order->id;
+            $notificationData->user_id = $order->user->id;
 
-            NotificationUtility::sendFirebaseNotification($request);
+            NotificationUtility::sendFirebaseNotification($notificationData);
         }
 
 
-        if (addon_is_activated('otp_system') && SmsTemplate::where('identifier', 'payment_status_change')->first()->status == 1) {
+        $smsTemplate = SmsTemplate::where('identifier', 'payment_status_change')->first();
+        if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
             try {
-                SmsUtility::payment_status_change(json_decode($order->shipping_address)->phone, $order);
+                $shipping_address = json_decode($order->shipping_address);
+                if ($shipping_address && isset($shipping_address->phone)) {
+                    SmsUtility::payment_status_change($shipping_address->phone, $order);
+                }
             } catch (\Exception $e) {
 
             }
@@ -1115,7 +1195,8 @@ class OrderController extends Controller
                 }
             }
 
-            if (addon_is_activated('otp_system') && SmsTemplate::where('identifier', 'assign_delivery_boy')->first()->status == 1) {
+            $smsTemplate = SmsTemplate::where('identifier', 'assign_delivery_boy')->first();
+            if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
                 try {
                     SmsUtility::assign_delivery_boy($order->delivery_boy->phone, $order->code);
                 } catch (\Exception $e) {

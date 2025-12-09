@@ -43,17 +43,26 @@
             </div>
             <div class="col-md-3 ml-auto">
                 <label for="update_delivery_status">{{translate('Delivery Status')}}</label>
-                @if($delivery_status != 'delivered' && $delivery_status != 'cancelled')
+                @if($delivery_status != 'delivered' && $delivery_status != 'cancelled' && $delivery_status != 'transfered')
                     <select class="form-control aiz-selectpicker"  data-minimum-results-for-search="Infinity" id="update_delivery_status">
                         <option value="pending" @if ($delivery_status == 'pending') selected @endif>{{translate('Pending')}}</option>
                         <option value="confirmed" @if ($delivery_status == 'confirmed') selected @endif>{{translate('Confirmed')}}</option>
                         <option value="picked_up" @if ($delivery_status == 'picked_up') selected @endif>{{translate('Picked Up')}}</option>
                         <option value="on_the_way" @if ($delivery_status == 'on_the_way') selected @endif>{{translate('On The Way')}}</option>
                         <option value="delivered" @if ($delivery_status == 'delivered') selected @endif>{{translate('Delivered')}}</option>
+                        {{-- Show Transfered option if any product has b_product_id --}}
+                        @php
+                            $hasBProductId = $order->orderDetails->contains(function ($orderDetail) {
+                                return $orderDetail->product && $orderDetail->product->b_product_id;
+                            });
+                        @endphp
+                        @if($hasBProductId)
+                        <option value="transfered" @if ($delivery_status == 'transfered') selected @endif>{{translate('Transfered')}}</option>
+                        @endif
                         <option value="cancelled" @if ($delivery_status == 'cancelled') selected @endif>{{translate('Cancel')}}</option>
                     </select>
                 @else
-                    <input type="text" class="form-control" value="{{ $delivery_status }}" disabled>
+                    <input type="text" class="form-control" value="{{ translate(ucfirst($delivery_status)) }}" disabled>
                 @endif
             </div>
             <div class="col-md-3 ml-auto">
@@ -152,7 +161,7 @@
                             </td>
                             <td>
                                 @if ($orderDetail->product != null && $orderDetail->product->auction_product == 0)
-                                    <strong><a href="{{ route('product', $orderDetail->product->slug) }}" target="_blank" class="text-muted">{{ $orderDetail->product->getTranslation('name') }}</a></strong>
+                                    <strong><a href="{{ env('APP_URL') . $orderDetail->product->id .'/' . $orderDetail->product->slug }}" target="_blank" class="text-muted">{{ $orderDetail->product->getTranslation('name') }}</a></strong>
                                     <small>{{ $orderDetail->variation }}</small>
                                 @elseif ($orderDetail->product != null && $orderDetail->product->auction_product == 1)
                                     <strong><a href="{{ route('auction-product', $orderDetail->product->slug) }}" target="_blank" class="text-muted">{{ $orderDetail->product->getTranslation('name') }}</a></strong>
@@ -258,7 +267,21 @@
                 order_id:order_id,
                 status:status
             }, function(data){
-                AIZ.plugins.notify('success', '{{ translate('Delivery status has been updated') }}');
+                if(data.success) {
+                    AIZ.plugins.notify('success', data.message || '{{ translate('Delivery status has been updated') }}');
+                    // Reload page after short delay to show updated status
+                    setTimeout(function() {
+                        location.reload();
+                    }, 1000);
+                } else {
+                    AIZ.plugins.notify('danger', data.message || '{{ translate('Error updating delivery status') }}');
+                }
+            }).fail(function(xhr) {
+                var errorMsg = '{{ translate('Error updating delivery status') }}';
+                if(xhr.responseJSON && xhr.responseJSON.message) {
+                    errorMsg = xhr.responseJSON.message;
+                }
+                AIZ.plugins.notify('danger', errorMsg);
             });
         });
 
