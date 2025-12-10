@@ -753,337 +753,350 @@ class OrderController extends Controller
 
     public function update_delivery_status(Request $request)
 {
-    $order = Order::findOrFail($request->order_id);
-    $order->delivery_viewed = '0';
-    $order->save();
-
-    $shippingCharge = $order->orderDetails()->sum('shipping_cost');
+    // Begin database transaction
+    DB::beginTransaction();
     
-    // Use 'status' parameter from the AJAX request
-    $newStatus = $request->status;
-
-    if ($newStatus === 'transfered') {
-        // All transferable products (those that have b_product_id)
-        $transferable = $order->orderDetails()->whereHas('product', function ($q) {
-            $q->whereNotNull('b_product_id');
-        })->get();
-
-        $totalItems = $order->orderDetails()->count();
-
-        // ---------------- CASE 1: All items transferable ----------------
-        if ($transferable->count() === $totalItems) {
-            $order->delivery_status = 'transfered';
-            $order->save();
-
-            // ---------------- API CALL for same order ----------------
-            $appKey = get_setting('droploo_app_key', '');
-            $appSecret = get_setting('droploo_app_secret', '');
-            $userName = get_setting('droploo_username', '');
-            $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
-
-            $order_shipping_address = json_decode($order->shipping_address);
-            
-            // Add null check for shipping address
-            if (!$order_shipping_address) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Invalid shipping address data'
-                ]);
-            }
-
-            $payload = [
-                'invoice_number'        => ($order->code ?? $order->id),
-                'customer_name'         => $order_shipping_address->name ?? '',
-                'customer_phone'        => $order_shipping_address->phone ?? '',
-                'delivery_cost'         => (int) $shippingCharge,
-                'customer_address'      => $order_shipping_address->address ?? '',
-                'price'                 => (int) $order->grand_total,
-                'discount'              => 0,
-                'advance'               => 0,
-                'product_quantity'      => $order->orderDetails->sum('quantity'),
-                'delivery_charge_type'  => 'COD',
-                'payment_type'          => 'wallet',
-                'order_type'            => 'Dropshipping',
-                'special_notes'         => $order->notes ?? $request->note ?? "No notes provided",
-                'payment_gateway'       => $order->payment_type ?? 'N/A',
-                'transaction_id'        => $order->payment_details ?? null,
-                'products'              => $order->orderDetails->map(function ($detail) {
-                    // Check if product exists and has b_product_id
-                    if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
-                        return null;
-                    }
-                    return [
-                        'id'    => $detail->product->b_product_id ?? null,
-                        'price' => $detail->price,
-                        'color' => $detail->variation ?? null,
-                        'size'  => $detail->variation ?? null,
-                        'qty'   => $detail->quantity,
-                    ];
-                })->filter(fn($p) => $p !== null)->values()->all(),
-            ];
-            // Validate that we have products to transfer
-            if (empty($payload['products'])) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No valid products with b_product_id found for transfer'
-                ]);
-            }
-
-            // Add validation for required fields
-            if (empty($appKey) || empty($appSecret) || empty($userName)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Missing Droploo API credentials'
-                ]);
-            }
-
-            try {
-                $response = Http::withHeaders([
-                    'App-Secret' => $appSecret,
-                    'App-Key'    => $appKey,
-                    'Username'   => $userName,
-                ])->post($apiEndpoint, $payload);
-
-                if (!$response->successful()) {
-                    $errorResponse = $response->json();
-                    throw new \Exception($errorResponse['message'] ?? 'Unknown API error');
-                }
-            } catch (\Exception $e) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message'    => $e->getMessage()
-                ]);
-            }
-        }
-
-        // ---------------- CASE 2: Some items transferable ----------------
-        elseif ($transferable->count() > 0) {
-            $newOrder = $order->replicate();
-            $newOrder->delivery_status = 'transfered';
-            $newOrder->save();
-
-            $originalShipping = $shippingCharge;
-            $originalTotal = $originalDiscount = $newOrderTotal = $newOrderDiscount = 0;
-
-            foreach ($transferable as $line) {
-                // clone transferable line to new order
-                $newLine = $line->replicate();
-                $newLine->order_id = $newOrder->id;
-                $newLine->save();
-
-                // calculate new order totals
-                $newOrderTotal += $line->quantity * $line->price;
-                $newOrderDiscount += $order->coupon_discount ?? 0;
-
-                // remove from original order
-                $line->delete();
-            }
-
-            // recalc original order totals
-            foreach ($order->orderDetails as $line) {
-                $originalTotal += $line->quantity * $line->price;
-                $originalDiscount += $order->coupon_discount ?? 0;
-            }
-
-            // update original order
-            $order->grand_total = $originalTotal + $originalShipping - $originalDiscount;
-            $order->coupon_discount = $originalDiscount;
-            $order->status = 'pending';
-            $order->save();
-
-            // update new order
-            $newOrder->grand_total = $newOrderTotal + $originalShipping - $newOrderDiscount;
-            $newOrder->coupon_discount = $newOrderDiscount;
-            $newOrder->save();
-
-            // ---------------- API CALL for new order ----------------
-            $appKey = get_setting('droploo_app_key', '');
-            $appSecret = get_setting('droploo_app_secret', '');
-            $userName = get_setting('droploo_username', '');
-            $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
-
-            $order_shipping_address = json_decode($newOrder->shipping_address);
-            
-            // Add null check for shipping address
-            if (!$order_shipping_address) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Invalid shipping address data for new order'
-                ]);
-            }
-
-            $payload = [
-                'invoice_number'        => ($newOrder->code ?? $newOrder->id),
-                'customer_name'         => $order_shipping_address->name ?? '',
-                'customer_phone'        => $order_shipping_address->phone ?? '',
-                'delivery_cost'         => (int) $originalShipping,
-                'customer_address'      => $order_shipping_address->address ?? '',
-                'price'                 => (int) $newOrder->grand_total,
-                'discount'              => 0,
-                'advance'               => 0,
-                'product_quantity'      => $newOrder->orderDetails->sum('quantity'),
-                'delivery_charge_type'  => 'COD',
-                'payment_type'          => 'wallet',
-                'order_type'            => 'Dropshipping',
-                'special_notes'         => $newOrder->notes ?? 'N/A',
-                'payment_gateway'       => $newOrder->payment_type ?? 'N/A',
-                'transaction_id'        => $newOrder->payment_details ?? null,
-                'products'              => $newOrder->orderDetails->map(function ($detail) {
-                    // Check if product exists and has b_product_id
-                    if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
-                        return null;
-                    }
-                    return [
-                        'id'    => $detail->product->b_product_id ?? null,
-                        'price' => $detail->price,
-                        'color' => $detail->variation ?? null,
-                        'size'  => $detail->variation ?? null,
-                        'qty'   => $detail->quantity,
-                    ];
-                })->filter(fn($p) => $p !== null)->values()->all(),
-            ];
-
-            // Validate that we have products to transfer
-            if (empty($payload['products'])) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No valid products with b_product_id found for transfer in new order'
-                ]);
-            }
-
-            // Add validation for required fields
-            if (empty($appKey) || empty($appSecret) || empty($userName)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Missing Droploo API credentials for new order'
-                ]);
-            }
-
-            try {
-                $response = Http::withHeaders([
-                    'App-Secret' => $appSecret,
-                    'App-Key'    => $appKey,
-                    'Username'   => $userName,
-                ])->post($apiEndpoint, $payload);
-
-                if (!$response->successful()) {
-                    $errorResponse = $response->json();
-                    throw new \Exception($errorResponse['message'] ?? 'Unknown API error');
-                }
-            } catch (\Exception $e) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message'    => $e->getMessage()
-                ]);
-            }
-        }
-    }
-
-    // ---------------- NON-TRANSFER STATUS ----------------
-    else {
-        $order->delivery_status = $request->status;
+    try {
+        $order = Order::findOrFail($request->order_id);
+        $order->delivery_viewed = '0';
         $order->save();
-    }
 
-    // ---------------- WALLET REFUND ----------------
-    if ($request->status == 'cancelled' && $order->payment_type == 'wallet') {
-        $user = User::find($order->user_id);
-        if ($user) {
-            $user->balance += $order->grand_total;
-            $user->save();
-        }
-    }
+        $shippingCharge = $order->orderDetails()->sum('shipping_cost');
+        
+        // Use 'status' parameter from the AJAX request
+        $newStatus = $request->status;
 
-    // ---------------- PRODUCT STOCK / SELLER LOGIC ----------------
-    if (Auth::user()->user_type == 'seller') {
-        foreach ($order->orderDetails->where('seller_id', Auth::user()->id) as $orderDetail) {
-            $orderDetail->delivery_status = $request->status;
-            $orderDetail->save();
+        if ($newStatus === 'transfered') {
+            // All transferable products (those that have b_product_id)
+            $transferable = $order->orderDetails()->whereHas('product', function ($q) {
+                $q->whereNotNull('b_product_id');
+            })->get();
 
-            if ($request->status == 'cancelled') {
-                $variant = $orderDetail->variation ?? '';
-                $product_stock = ProductStock::where('product_id', $orderDetail->product_id)
-                    ->where('variant', $variant)
-                    ->first();
-                if ($product_stock) {
-                    $product_stock->qty += $orderDetail->quantity;
-                    $product_stock->save();
+            $totalItems = $order->orderDetails()->count();
+
+            // ---------------- CASE 1: All items transferable ----------------
+            if ($transferable->count() === $totalItems) {
+                $order->delivery_status = 'transfered';
+                $order->save();
+
+                // ---------------- API CALL for same order ----------------
+                $appKey = get_setting('droploo_app_key', '');
+                $appSecret = get_setting('droploo_app_secret', '');
+                $userName = get_setting('droploo_username', '');
+                $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
+
+                $order_shipping_address = json_decode($order->shipping_address);
+                
+                // Add null check for shipping address
+                if (!$order_shipping_address) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Invalid shipping address data'
+                    ]);
+                }
+
+                $payload = [
+                    'invoice_number'        => ($order->code ?? $order->id),
+                    'customer_name'         => $order_shipping_address->name ?? '',
+                    'customer_phone'        => $order_shipping_address->phone ?? '',
+                    'delivery_cost'         => (int) $shippingCharge,
+                    'customer_address'      => $order_shipping_address->address ?? '',
+                    'price'                 => (int) $order->grand_total,
+                    'discount'              => 0,
+                    'advance'               => 0,
+                    'product_quantity'      => $order->orderDetails->sum('quantity'),
+                    'delivery_charge_type'  => 'COD',
+                    'payment_type'          => 'wallet',
+                    'order_type'            => 'Dropshipping',
+                    'special_notes'         => $order->notes ?? $request->note ?? "No notes provided",
+                    'payment_gateway'       => $order->payment_type ?? 'N/A',
+                    'transaction_id'        => $order->payment_details ?? null,
+                    'products'              => $order->orderDetails->map(function ($detail) {
+                        // Check if product exists and has b_product_id
+                        if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
+                            return null;
+                        }
+                        return [
+                            'id'    => $detail->product->b_product_id ?? null,
+                            'price' => $detail->price,
+                            'color' => $detail->variation ?? null,
+                            'size'  => $detail->variation ?? null,
+                            'qty'   => $detail->quantity,
+                        ];
+                    })->filter(fn($p) => $p !== null)->values()->all(),
+                ];
+                // Validate that we have products to transfer
+                if (empty($payload['products'])) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'No valid products with b_product_id found for transfer'
+                    ]);
+                }
+
+                // Add validation for required fields
+                if (empty($appKey) || empty($appSecret) || empty($userName)) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Missing Droploo API credentials'
+                    ]);
+                }
+
+                try {
+                    $response = Http::withHeaders([
+                        'App-Secret' => $appSecret,
+                        'App-Key'    => $appKey,
+                        'Username'   => $userName,
+                    ])->post($apiEndpoint, $payload);
+
+                    if (!$response->successful()) {
+                        $errorResponse = $response->json();
+                        throw new \Exception($errorResponse['message'] ?? 'Unknown API error');
+                    }
+                } catch (\Exception $e) {
+                    // Don't rollback here, let the outer catch handle it
+                    throw $e;
+                }
+            }
+
+            // ---------------- CASE 2: Some items transferable ----------------
+            elseif ($transferable->count() > 0) {
+                $newOrder = $order->replicate();
+                $newOrder->delivery_status = 'transfered';
+                $newOrder->save();
+
+                $originalShipping = $shippingCharge;
+                $originalTotal = $originalDiscount = $newOrderTotal = $newOrderDiscount = 0;
+
+                foreach ($transferable as $line) {
+                    // clone transferable line to new order
+                    $newLine = $line->replicate();
+                    $newLine->order_id = $newOrder->id;
+                    $newLine->save();
+
+                    // calculate new order totals
+                    $newOrderTotal += $line->quantity * $line->price;
+                    $newOrderDiscount += $order->coupon_discount ?? 0;
+
+                    // remove from original order
+                    $line->delete();
+                }
+
+                // recalc original order totals
+                foreach ($order->orderDetails as $line) {
+                    $originalTotal += $line->quantity * $line->price;
+                    $originalDiscount += $order->coupon_discount ?? 0;
+                }
+
+                // update original order
+                $order->grand_total = $originalTotal + $originalShipping - $originalDiscount;
+                $order->coupon_discount = $originalDiscount;
+                $order->status = 'pending';
+                $order->save();
+
+                // update new order
+                $newOrder->grand_total = $newOrderTotal + $originalShipping - $newOrderDiscount;
+                $newOrder->coupon_discount = $newOrderDiscount;
+                $newOrder->save();
+
+                // ---------------- API CALL for new order ----------------
+                $appKey = get_setting('droploo_app_key', '');
+                $appSecret = get_setting('droploo_app_secret', '');
+                $userName = get_setting('droploo_username', '');
+                $apiEndpoint = 'https://backend.droploo.com/api/product/create-order';
+
+                $order_shipping_address = json_decode($newOrder->shipping_address);
+                
+                // Add null check for shipping address
+                if (!$order_shipping_address) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Invalid shipping address data for new order'
+                    ]);
+                }
+
+                $payload = [
+                    'invoice_number'        => ($newOrder->code ?? $newOrder->id),
+                    'customer_name'         => $order_shipping_address->name ?? '',
+                    'customer_phone'        => $order_shipping_address->phone ?? '',
+                    'delivery_cost'         => (int) $originalShipping,
+                    'customer_address'      => $order_shipping_address->address ?? '',
+                    'price'                 => (int) $newOrder->grand_total,
+                    'discount'              => 0,
+                    'advance'               => 0,
+                    'product_quantity'      => $newOrder->orderDetails->sum('quantity'),
+                    'delivery_charge_type'  => 'COD',
+                    'payment_type'          => 'wallet',
+                    'order_type'            => 'Dropshipping',
+                    'special_notes'         => $newOrder->notes ?? 'N/A',
+                    'payment_gateway'       => $newOrder->payment_type ?? 'N/A',
+                    'transaction_id'        => $newOrder->payment_details ?? null,
+                    'products'              => $newOrder->orderDetails->map(function ($detail) {
+                        // Check if product exists and has b_product_id
+                        if (!$detail->product || !isset($detail->product->b_product_id) || !$detail->product->b_product_id) {
+                            return null;
+                        }
+                        return [
+                            'id'    => $detail->product->b_product_id ?? null,
+                            'price' => $detail->price,
+                            'color' => $detail->variation ?? null,
+                            'size'  => $detail->variation ?? null,
+                            'qty'   => $detail->quantity,
+                        ];
+                    })->filter(fn($p) => $p !== null)->values()->all(),
+                ];
+
+                // Validate that we have products to transfer
+                if (empty($payload['products'])) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'No valid products with b_product_id found for transfer in new order'
+                    ]);
+                }
+
+                // Add validation for required fields
+                if (empty($appKey) || empty($appSecret) || empty($userName)) {
+                    // Commit transaction before returning
+                    DB::commit();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Missing Droploo API credentials for new order'
+                    ]);
+                }
+
+                try {
+                    $response = Http::withHeaders([
+                        'App-Secret' => $appSecret,
+                        'App-Key'    => $appKey,
+                        'Username'   => $userName,
+                    ])->post($apiEndpoint, $payload);
+
+                    if (!$response->successful()) {
+                        $errorResponse = $response->json();
+                        throw new \Exception($errorResponse['message'] ?? 'Unknown API error');
+                    }
+                } catch (\Exception $e) {
+                    // Don't rollback here, let the outer catch handle it
+                    throw $e;
                 }
             }
         }
-    } else {
-        foreach ($order->orderDetails as $orderDetail) {
-            $orderDetail->delivery_status = $request->status;
-            $orderDetail->save();
 
-            if ($request->status == 'cancelled') {
-                $variant = $orderDetail->variation ?? '';
-                $product_stock = ProductStock::where('product_id', $orderDetail->product_id)
-                    ->where('variant', $variant)
-                    ->first();
-                if ($product_stock) {
-                    $product_stock->qty += $orderDetail->quantity;
-                    $product_stock->save();
+        // ---------------- NON-TRANSFER STATUS ----------------
+        else {
+            $order->delivery_status = $request->status;
+            $order->save();
+        }
+
+        // ---------------- WALLET REFUND ----------------
+        if ($request->status == 'cancelled' && $order->payment_type == 'wallet') {
+            $user = User::find($order->user_id);
+            if ($user) {
+                $user->balance += $order->grand_total;
+                $user->save();
+            }
+        }
+
+        // ---------------- PRODUCT STOCK / SELLER LOGIC ----------------
+        if (Auth::user()->user_type == 'seller') {
+            foreach ($order->orderDetails->where('seller_id', Auth::user()->id) as $orderDetail) {
+                $orderDetail->delivery_status = $request->status;
+                $orderDetail->save();
+
+                if ($request->status == 'cancelled') {
+                    $variant = $orderDetail->variation ?? '';
+                    $product_stock = ProductStock::where('product_id', $orderDetail->product_id)
+                        ->where('variant', $variant)
+                        ->first();
+                    if ($product_stock) {
+                        $product_stock->qty += $orderDetail->quantity;
+                        $product_stock->save();
+                    }
                 }
             }
+        } else {
+            foreach ($order->orderDetails as $orderDetail) {
+                $orderDetail->delivery_status = $request->status;
+                $orderDetail->save();
 
-            // ---------------- AFFILIATE SYSTEM ----------------
-            if (addon_is_activated('affiliate_system') && class_exists('App\Http\Controllers\AffiliateController')) {
-                if (($request->status == 'delivered' || $request->status == 'cancelled') &&
-                    $orderDetail->product_referral_code) {
-
-                    $no_of_delivered = $request->status == 'delivered' ? $orderDetail->quantity : 0;
-                    $no_of_canceled = $request->status == 'cancelled' ? $orderDetail->quantity : 0;
-
-                    $referred_by_user = User::where('referral_code', $orderDetail->product_referral_code)->first();
-                    if ($referred_by_user) {
-                        $affiliateController = new \App\Http\Controllers\AffiliateController;
-                        $affiliateController->processAffiliateStats($referred_by_user->id, 0, 0, $no_of_delivered, $no_of_canceled);
+                if ($request->status == 'cancelled') {
+                    $variant = $orderDetail->variation ?? '';
+                    $product_stock = ProductStock::where('product_id', $orderDetail->product_id)
+                        ->where('variant', $variant)
+                        ->first();
+                    if ($product_stock) {
+                        $product_stock->qty += $orderDetail->quantity;
+                        $product_stock->save();
                     }
                 }
             }
         }
-    }
 
-    // ---------------- OTP SYSTEM ----------------
-    $smsTemplate = SmsTemplate::where('identifier', 'delivery_status_change')->first();
-    if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
-        try {
-            $shipping_address = json_decode($order->shipping_address);
-            if ($shipping_address && isset($shipping_address->phone)) {
-                SmsUtility::delivery_status_change($shipping_address->phone, $order);
-            }
-        } catch (\Exception $e) {}
-    }
+        // ---------------- OTP SYSTEM ----------------
+        $smsTemplate = SmsTemplate::where('identifier', 'delivery_status_change')->first();
+        if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
+            try {
+                $shipping_address = json_decode($order->shipping_address);
+                if ($shipping_address && isset($shipping_address->phone)) {
+                    SmsUtility::delivery_status_change($shipping_address->phone, $order);
+                }
+            } catch (\Exception $e) {}
+        }
 
-    // ---------------- NOTIFICATIONS ----------------
-    NotificationUtility::sendNotification($order, $request->status);
+        // ---------------- NOTIFICATIONS ----------------
+        NotificationUtility::sendNotification($order, $request->status);
 
-    if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
-        // Create a temporary object with required properties for Firebase notification
-        $notificationData = new \stdClass();
-        $notificationData->device_token = $order->user->device_token;
-        $notificationData->title = "Order updated !";
-        $status = str_replace("_", "", $order->delivery_status);
-        $notificationData->text = " Your order {$order->code} has been {$status}";
-        $notificationData->type = "order";
-        $notificationData->id = $order->id;
-        $notificationData->user_id = $order->user->id;
-        NotificationUtility::sendFirebaseNotification($notificationData);
+        if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
+            // Create a temporary object with required properties for Firebase notification
+            $notificationData = new \stdClass();
+            $notificationData->device_token = $order->user->device_token;
+            $notificationData->title = "Order updated !";
+            $status = str_replace("_", "", $order->delivery_status);
+            $notificationData->text = " Your order {$order->code} has been {$status}";
+            $notificationData->type = "order";
+            $notificationData->id = $order->id;
+            $notificationData->user_id = $order->user->id;
+            NotificationUtility::sendFirebaseNotification($notificationData);
+        }
+        
+        // Commit transaction
+        DB::commit();
+        
+        // Check if this is an AJAX request
+        if ($request->ajax() || $request->wantsJson()) {
+            return response()->json([
+                'success' => true,
+                'message' => translate('Delivery status has been updated')
+            ]);
+        }
+        
+        flash(translate('Order has been status update successfully'))->success();
+        return back();
+        
+    } catch (\Exception $e) {
+        // Rollback transaction on error
+        DB::rollBack();
+        
+        // Check if this is an AJAX request
+        if ($request->ajax() || $request->wantsJson()) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ]);
+        }
+        
+        flash(translate('An error occurred while updating delivery status: ') . $e->getMessage())->error();
+        return back();
     }
-    
-    // Check if this is an AJAX request
-    if ($request->ajax() || $request->wantsJson()) {
-        return response()->json([
-            'success' => true,
-            'message' => translate('Delivery status has been updated')
-        ]);
-    }
-    
-    flash(translate('Order has been status update successfully'))->success();
-    return back();
 }
 
    public function update_tracking_code(Request $request) {
