@@ -41,7 +41,7 @@
 					$str .= '-';
 					$sku .= '-';
 				}
-				$str .= str_replace(' ', '', $variant['size']);
+				$str .= str_replace(' ', ' ', $variant['size']);
 				$sku .= str_replace(' ', '', $variant['size']);
 			}
 			
@@ -54,14 +54,9 @@
 			<tr class="variant">
 				<td>
 					<label for="" class="control-label">
-						@if(!empty($variant['color']))
-							Color: {{ $variant['color'] }}
-						@endif
-						@if(!empty($variant['size']))
-							@if(!empty($variant['color'])) / @endif
-							Size: {{ $variant['size'] }}
-						@endif
+						{{ $str }}
 					</label>
+					<input type="hidden" name="variant_name_{{ $field_str }}" value="{{ $str }}">
 				</td>
 				<td>
 					<input type="number" lang="en" name="wholesale_price_{{ $field_str }}" value="{{ $variant['wholesale_price'] ?? 0 }}" min="0" step="0.01" class="form-control" readonly>
@@ -70,7 +65,7 @@
 					<input type="number" lang="en" name="price_{{ $field_str }}" value="{{ $variant['price'] ?? 0 }}" min="0" step="0.01" class="form-control" required>
 				</td>
 				<td>
-					<input type="text" name="sku_{{ $field_str }}" value="{{ $sku }}" class="form-control">
+					<input type="text" name="sku_{{ $field_str }}" value="" class="form-control">
 				</td>
 				<td>
 					<input type="number" lang="en" name="qty_{{ $field_str }}" value="10" min="0" step="1" class="form-control" required>
