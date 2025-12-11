@@ -651,30 +651,49 @@ class OrderController extends Controller
     {
         $order = Order::findOrFail($id);
         
-        // Update customer information
-        $shipping_address = json_decode($order->shipping_address, true);
-        if ($shipping_address) {
-            $shipping_address['name'] = $request->customer_name;
-            $shipping_address['email'] = $request->customer_email;
-            $shipping_address['phone'] = $request->customer_phone;
-            $shipping_address['address'] = $request->customer_address;
-            $order->shipping_address = json_encode($shipping_address);
+        // Update customer information only if provided
+        if ($request->hasAny(['customer_name', 'customer_email', 'customer_phone', 'customer_address'])) {
+            $shipping_address = json_decode($order->shipping_address, true);
+            if ($shipping_address) {
+                if ($request->has('customer_name')) {
+                    $shipping_address['name'] = $request->customer_name;
+                }
+                if ($request->has('customer_email')) {
+                    $shipping_address['email'] = $request->customer_email;
+                }
+                if ($request->has('customer_phone')) {
+                    $shipping_address['phone'] = $request->customer_phone;
+                }
+                if ($request->has('customer_address')) {
+                    $shipping_address['address'] = $request->customer_address;
+                }
+                $order->shipping_address = json_encode($shipping_address);
+            }
         }
         
-        // Update order status
-        $order->payment_status = $request->payment_status;
-        $order->delivery_status = $request->delivery_status;
-        $order->tracking_code = $request->tracking_code;
-        $order->notes = $request->note;
+        // Update order status fields only if provided
+        if ($request->has('payment_status')) {
+            $order->payment_status = $request->payment_status;
+        }
+        if ($request->has('delivery_status')) {
+            $order->delivery_status = $request->delivery_status;
+        }
+        if ($request->has('tracking_code')) {
+            $order->tracking_code = $request->tracking_code;
+        }
+        if ($request->has('note')) {
+            $order->notes = $request->note;
+        }
         
-        // Update order details (quantity, price, discount)
+        // Update order details (quantity, price, discount) only if provided
         $subtotal = 0;
+        $subtotalUpdated = false;
         if ($request->has('order_details')) {
             foreach ($request->order_details as $orderDetailData) {
                 $orderDetail = OrderDetail::find($orderDetailData['id']);
                 if ($orderDetail) {
-                    $quantity = (int) $orderDetailData['quantity'];
-                    $unitPrice = (float) $orderDetailData['price'];
+                    $quantity = (int) ($orderDetailData['quantity'] ?? $orderDetail->quantity);
+                    $unitPrice = (float) ($orderDetailData['price'] ?? ($orderDetail->price / max($orderDetail->quantity, 1)));
                     $discount = (float) ($orderDetailData['discount'] ?? 0);
                     
                     // Update order detail
@@ -684,12 +703,15 @@ class OrderController extends Controller
                     
                     // Add to subtotal
                     $subtotal += $orderDetail->price;
+                    $subtotalUpdated = true;
                 }
             }
         }
         
-        // Update order grand total
-        $order->grand_total = $subtotal + ($order->shipping_cost ?? 0) + ($order->tax ?? 0);
+        // Update order grand total only if order details were updated
+        if ($subtotalUpdated) {
+            $order->grand_total = $subtotal + ($order->shipping_cost ?? 0) + ($order->tax ?? 0);
+        }
         
         if ($order->save()) {
             flash(translate('Order has been updated successfully'))->success();
