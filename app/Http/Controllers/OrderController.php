@@ -757,6 +757,7 @@ class OrderController extends Controller
     DB::beginTransaction();
     
     try {
+        
         $order = Order::findOrFail($request->order_id);
         $order->delivery_viewed = '0';
         $order->save();
@@ -1052,22 +1053,6 @@ class OrderController extends Controller
             } catch (\Exception $e) {}
         }
 
-        // ---------------- NOTIFICATIONS ----------------
-        NotificationUtility::sendNotification($order, $request->status);
-
-        if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
-            // Create a temporary object with required properties for Firebase notification
-            $notificationData = new \stdClass();
-            $notificationData->device_token = $order->user->device_token;
-            $notificationData->title = "Order updated !";
-            $status = str_replace("_", "", $order->delivery_status);
-            $notificationData->text = " Your order {$order->code} has been {$status}";
-            $notificationData->type = "order";
-            $notificationData->id = $order->id;
-            $notificationData->user_id = $order->user->id;
-            NotificationUtility::sendFirebaseNotification($notificationData);
-        }
-        
         // Commit transaction
         DB::commit();
         
@@ -1100,75 +1085,116 @@ class OrderController extends Controller
 }
 
    public function update_tracking_code(Request $request) {
-        $order = Order::findOrFail($request->order_id);
-        $order->tracking_code = $request->tracking_code;
-        $order->save();
+        try {
+            $order = Order::findOrFail($request->order_id);
+            $order->tracking_code = $request->tracking_code;
+            $order->save();
 
-        return 1;
-   }
+            // Check if this is an AJAX request
+            if ($request->ajax() || $request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => translate('Order tracking code has been updated')
+                ]);
+            }
+            
+            return 1;
+        } catch (\Exception $e) {
+            // Check if this is an AJAX request
+            if ($request->ajax() || $request->wantsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage()
+                ]);
+            }
+            
+            return 0;
+        }
+    }
 
     public function update_payment_status(Request $request)
     {
-        $order = Order::findOrFail($request->order_id);
-        $order->payment_status_viewed = '0';
-        $order->save();
+        try {
+            $order = Order::findOrFail($request->order_id);
+            $order->payment_status_viewed = '0';
+            $order->save();
 
-        if (Auth::user()->user_type == 'seller') {
-            foreach ($order->orderDetails->where('seller_id', Auth::user()->id) as $key => $orderDetail) {
-                $orderDetail->payment_status = $request->status;
-                $orderDetail->save();
-            }
-        } else {
-            foreach ($order->orderDetails as $key => $orderDetail) {
-                $orderDetail->payment_status = $request->status;
-                $orderDetail->save();
-            }
-        }
-
-        $status = 'paid';
-        foreach ($order->orderDetails as $key => $orderDetail) {
-            if ($orderDetail->payment_status != 'paid') {
-                $status = 'unpaid';
-            }
-        }
-        $order->payment_status = $status;
-        $order->save();
-
-
-        if ($order->payment_status == 'paid' && $order->commission_calculated == 0) {
-            calculateCommissionAffilationClubPoint($order);
-        }
-
-        //sends Notifications to user
-        NotificationUtility::sendNotification($order, $request->status);
-        if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
-            // Create a temporary object with required properties for Firebase notification
-            $notificationData = new \stdClass();
-            $notificationData->device_token = $order->user->device_token;
-            $notificationData->title = "Order updated !";
-            $status = str_replace("_", "", $order->payment_status);
-            $notificationData->text = " Your order {$order->code} has been {$status}";
-
-            $notificationData->type = "order";
-            $notificationData->id = $order->id;
-            $notificationData->user_id = $order->user->id;
-
-            NotificationUtility::sendFirebaseNotification($notificationData);
-        }
-
-
-        $smsTemplate = SmsTemplate::where('identifier', 'payment_status_change')->first();
-        if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
-            try {
-                $shipping_address = json_decode($order->shipping_address);
-                if ($shipping_address && isset($shipping_address->phone)) {
-                    SmsUtility::payment_status_change($shipping_address->phone, $order);
+            if (Auth::user()->user_type == 'seller') {
+                foreach ($order->orderDetails->where('seller_id', Auth::user()->id) as $key => $orderDetail) {
+                    $orderDetail->payment_status = $request->status;
+                    $orderDetail->save();
                 }
-            } catch (\Exception $e) {
-
+            } else {
+                foreach ($order->orderDetails as $key => $orderDetail) {
+                    $orderDetail->payment_status = $request->status;
+                    $orderDetail->save();
+                }
             }
+
+            $status = 'paid';
+            foreach ($order->orderDetails as $key => $orderDetail) {
+                if ($orderDetail->payment_status != 'paid') {
+                    $status = 'unpaid';
+                }
+            }
+            $order->payment_status = $status;
+            $order->save();
+
+
+            if ($order->payment_status == 'paid' && $order->commission_calculated == 0) {
+                calculateCommissionAffilationClubPoint($order);
+            }
+
+            //sends Notifications to user
+            NotificationUtility::sendNotification($order, $request->status);
+            if (get_setting('google_firebase') == 1 && $order->user && $order->user->device_token != null) {
+                // Create a temporary object with required properties for Firebase notification
+                $notificationData = new \stdClass();
+                $notificationData->device_token = $order->user->device_token;
+                $notificationData->title = "Order updated !";
+                $status = str_replace("_", "", $order->payment_status);
+                $notificationData->text = " Your order {$order->code} has been {$status}";
+
+                $notificationData->type = "order";
+                $notificationData->id = $order->id;
+                $notificationData->user_id = $order->user->id;
+
+                NotificationUtility::sendFirebaseNotification($notificationData);
+            }
+
+
+            $smsTemplate = SmsTemplate::where('identifier', 'payment_status_change')->first();
+            if (addon_is_activated('otp_system') && $smsTemplate && $smsTemplate->status == 1) {
+                try {
+                    $shipping_address = json_decode($order->shipping_address);
+                    if ($shipping_address && isset($shipping_address->phone)) {
+                        SmsUtility::payment_status_change($shipping_address->phone, $order);
+                    }
+                } catch (\Exception $e) {
+
+                }
+            }
+            
+            // Check if this is an AJAX request
+            if ($request->ajax() || $request->wantsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => translate('Payment status has been updated')
+                ]);
+            }
+            
+            return 1;
+        } catch (\Exception $e) {
+            // Check if this is an AJAX request
+            if ($request->ajax() || $request->wantsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage()
+                ]);
+            }
+            
+            return 0;
         }
-        return 1;
     }
 
     public function assign_delivery_boy(Request $request)
